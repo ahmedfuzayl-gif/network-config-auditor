@@ -46,7 +46,7 @@ eview_report.json.
 
 ### 2. Audit an Entire Fleet (Folder or Archive)
 Scan a directory recursively or audit a .zip / .tar.gz bundle of device configs in a single command:
-`ash
+`Bash
 # Directory audit
 python NTConfReviewer.py --dir ./network-backups --recursive -o fleet_audit
 
@@ -56,19 +56,19 @@ python NTConfReviewer.py fleet_configs.zip -o fleet_audit
 
 ### 3. CI/CD Pipeline Quality Gate
 Fail automated build pipelines if any finding at or above **High** severity is discovered:
-`ash
+`
 python NTConfReviewer.py core-switch.cfg --fail-on high
 `
 
 ### 4. Standalone Credential Decoder
 Decode Cisco Type 7 or Juniper $9$ reversible hashes directly:
-`ash
+`
 python NTConfReviewer.py --decode-password 0822455B0A
 `
 
 ### 5. Built-in Verification & Self-Test
 Verify all parser modules, detection heuristics, and decoding routines:
-`ash
+`
 python NTConfReviewer.py --self-test
 `
 
