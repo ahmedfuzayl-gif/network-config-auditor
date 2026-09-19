@@ -36,7 +36,7 @@ Built specifically for air-gapped enclaves, security operations centers (SOC), a
 ## Quick Start
 
 ### 1. Audit a Single Configuration File
-`ash
+`Bash
 python NTConfReviewer.py firewall.conf -o review_report
 `
 Generates 
