@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-NTConfReviewer.py (v4.0.0) - Offline Multi-Vendor Network & Firewall Security Review
-Enterprise Static Configuration Auditing Engine
+NTConfReviewer.py (v4.0.0) - Offline Multi-Vendor Network Configuration Review
+Static Configuration Review Tool
 
-Comprehensive, dependency-free, all-in-one static analyzer and compliance auditing
-engine for enterprise firewalls, routers, switches, and load balancers.
+Dependency-free static analyzer for firewall, router, switch, and load-balancer
+configuration files.
 
 Supported Vendor Platforms & Assets:
   * Cisco Systems:
@@ -50,12 +50,12 @@ Audit Rule Domains:
  10. Cryptography & VPN Standards (Weak ciphers, DES/3DES/MD5, DH groups < 14, TLS 1.0/1.1)
  11. Switch & Layer 2 Security (STP BPDU Guard, Root Guard, Port Security, VLAN 1, Trunk hygiene)
 
-Compliance Framework Cross-Mappings:
-  * CIS Benchmarks & CIS Critical Security Controls v8
-  * DoD DISA STIGs (Cisco ASA, IOS-XE, NX-OS, Junos SRX, FortiGate, PAN-OS, F5)
-  * NIST SP 800-53 Rev 5 & NIST SP 800-171 Rev 3
-  * PCI-DSS v4.0
-  * CMMC 2.0 (Level 1 & Level 2)
+Informational Security Framework Cross-Mappings:
+  * CIS Critical Security Controls v8
+  * NIST SP 800-53 Rev 5 and NIST SP 800-171 Rev 2
+  * PCI DSS v4.0.1 (when applicable to the assessed environment)
+  * CMMC 2.0 Level 2 (derived from NIST SP 800-171 Rev 2)
+  * Product/version-specific DISA STIG vulnerability IDs are not inferred
 
 Input Formats:
   * Raw text configs (.conf, .cfg, .set, .txt, .xml, .backup, .log)
@@ -79,14 +79,15 @@ import re
 import shlex
 import sys
 import tarfile
+import tempfile
 import zipfile
 from collections import defaultdict
 from datetime import datetime
 from xml.etree import ElementTree as ET
 
 
-TOOL_NAME = "Enterprise Network & Firewall Security Review"
-TOOL_SUBTITLE = "Enterprise Multi-Vendor Static Configuration Security Analyzer"
+TOOL_NAME = "NTConfReviewer"
+TOOL_SUBTITLE = "Offline Multi-Vendor Network Configuration Reviewer"
 TOOL_VERSION = "4.0.0"
 
 BANNER = r"""
@@ -199,14 +200,11 @@ REFERENCES = {
     "cis-benchmarks": (
         "CIS (Center for Internet Security) Benchmarks",
         "https://www.cisecurity.org/cis-benchmarks/"),
-    "disa-stig": (
-        "DoD Cyber Exchange DISA Security Technical Implementation Guides (STIGs)",
-        "https://public.cyber.mil/stigs/"),
     "nist-800-53": (
         "NIST Special Publication 800-53 Rev. 5: Security and Privacy Controls",
         "https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final"),
     "pci-dss": (
-        "Payment Card Industry Data Security Standard (PCI DSS) v4.0",
+        "Payment Card Industry Data Security Standard (PCI DSS) v4.0.1",
         "https://www.pcisecuritystandards.org/document_library/"),
 }
 
@@ -328,10 +326,11 @@ class DeviceInfo:
 
 
 class AuditResult:
-    def __init__(self, source, info, findings):
+    def __init__(self, source, info, findings, line_count=0):
         self.source = source
         self.info = info
         self.findings = sorted(findings, key=lambda f: (SEV.get(f.severity, 9), f.rule_id))
+        self.line_count = line_count
 
     @property
     def risk_score(self):
@@ -339,10 +338,9 @@ class AuditResult:
 
     @property
     def compliance_summary(self):
-        summary = {"CIS": 0, "DISA_STIG": 0, "NIST_800_53": 0, "PCI_DSS": 0, "CMMC": 0}
+        summary = {"CIS": 0, "NIST_800_53": 0, "PCI_DSS": 0, "CMMC": 0}
         for f in self.findings:
             if f.compliance.get("cis"): summary["CIS"] += 1
-            if f.compliance.get("stig"): summary["DISA_STIG"] += 1
             if f.compliance.get("nist_53"): summary["NIST_800_53"] += 1
             if f.compliance.get("pci_dss"): summary["PCI_DSS"] += 1
             if f.compliance.get("cmmc"): summary["CMMC"] += 1
@@ -351,7 +349,8 @@ class AuditResult:
     def as_dict(self):
         return {
             "source": self.source, "device": self.info.as_dict(),
-            "risk_score": self.risk_score, "counts": counts(self.findings),
+            "line_count": self.line_count, "risk_score": self.risk_score,
+            "counts": counts(self.findings),
             "compliance_summary": self.compliance_summary,
             "findings": [f.as_dict() for f in self.findings],
         }
@@ -988,106 +987,91 @@ def absence_confidence(info):
 
 
 # ----------------------------------------------------------------------
-# COMPLIANCE CROSS-MAPPING DATABASE (CIS, STIG, NIST 800-53, PCI-DSS, CMMC)
+# SECURITY FRAMEWORK CROSS-MAPPINGS
+# These are informational relationships, not assertions of compliance. Product-
+# and release-specific DISA STIG vulnerability IDs are intentionally not inferred.
 # ----------------------------------------------------------------------
 def comp_map(standard_tag):
     catalog = {
         "TELNET": {
-            "cis": "CIS Control 4.1: Secure Configuration / CIS Benchmarks Management Access",
-            "stig": "V-220521 (CAT I): The network device must not use cleartext protocols for management.",
+            "cis": "CIS Controls v8 Safeguard 4.6: Securely Manage Enterprise Assets and Software",
             "nist_53": "AC-17(2), CM-7, SC-8", "nist_171": "3.1.13, 3.4.7",
-            "pci_dss": "Req 2.2.3, 2.2.7", "cmmc": "AC.L2-3.1.13"
+            "pci_dss": "PCI DSS v4.0.1: 2.2.7"
         },
         "HTTP": {
-            "cis": "CIS Control 4.1: Disable Insecure Web Management",
-            "stig": "V-220522 (CAT I): Unencrypted HTTP administration must be disabled.",
+            "cis": "CIS Controls v8 Safeguard 4.6: Securely Manage Enterprise Assets and Software",
             "nist_53": "AC-17(2), CM-7(1)", "nist_171": "3.1.13, 3.4.7",
-            "pci_dss": "Req 2.2.3, 2.3.1", "cmmc": "AC.L2-3.1.13"
+            "pci_dss": "PCI DSS v4.0.1: 2.2.7"
         },
         "SSH": {
-            "cis": "CIS Control 4.1: Enforce SSHv2 and Modern Cryptographic Ciphers",
-            "stig": "V-220523 (CAT II): SSH version 2 must be enforced with approved crypto.",
+            "cis": "CIS Controls v8 Safeguards 4.6 and 12.6: Secure Management Protocols",
             "nist_53": "AC-17(2), SC-13", "nist_171": "3.1.13, 3.13.11",
-            "pci_dss": "Req 2.2.4, 2.3.1", "cmmc": "AC.L2-3.1.13"
+            "pci_dss": "PCI DSS v4.0.1: 2.2.7"
         },
         "PWD_ENCR": {
-            "cis": "CIS Control 5.2: Use Unique and Reversible-Proof Passwords",
-            "stig": "V-220525 (CAT I): Passwords must use strong non-reversible hashing algorithms.",
-            "nist_53": "IA-5(1), SC-28", "nist_171": "3.5.1, 3.5.10",
-            "pci_dss": "Req 8.3.6", "cmmc": "IA.L2-3.5.1"
+            "cis": "CIS Controls v8 Safeguards 4.2 and 5.2: Secure Network Configuration and Unique Passwords",
+            "nist_53": "IA-5(1), SC-28", "nist_171": "3.5.10"
         },
         "AAA_LOCKOUT": {
-            "cis": "CIS Control 5.4: Implement Centralized AAA and Account Lockout",
-            "stig": "V-220526 (CAT II): Devices must enforce logon lockout thresholds.",
-            "nist_53": "AC-7, IA-2", "nist_171": "3.1.8, 3.5.1",
-            "pci_dss": "Req 8.3.4", "cmmc": "AC.L2-3.1.8"
+            "cis": "CIS Controls v8 Safeguards 6.5 and 12.5: Administrative MFA and Centralized Network AAA",
+            "nist_53": "AC-7, IA-2", "nist_171": "3.1.8",
+            "pci_dss": "PCI DSS v4.0.1: 8.3.4"
         },
         "SNMP": {
-            "cis": "CIS Control 4.8: Secure SNMP Deployment",
-            "stig": "V-220530 (CAT II): Insecure SNMP community strings must be disabled; require SNMPv3.",
-            "nist_53": "CM-6, CM-7, IA-2", "nist_171": "3.4.2, 3.5.2",
-            "pci_dss": "Req 2.2.1, 2.2.4", "cmmc": "CM.L2-3.4.2"
+            "cis": "CIS Controls v8 Safeguards 4.8 and 12.6: Disable Unnecessary Services and Use Secure Management Protocols",
+            "nist_53": "CM-7, IA-2, SC-8", "nist_171": "3.4.7, 3.13.8"
         },
         "LOGGING": {
-            "cis": "CIS Control 8.2, 8.5: Centralized Logging and Audit Trail",
-            "stig": "V-220540 (CAT II): The network device must transmit audit records to a central syslog/SIEM.",
+            "cis": "CIS Controls v8 Safeguards 8.2 and 13.1: Collect Audit Logs and Centralize Security Event Alerting",
             "nist_53": "AU-2, AU-3, AU-6, AU-12", "nist_171": "3.3.1, 3.3.2",
-            "pci_dss": "Req 10.2.1, 10.3.1", "cmmc": "AU.L2-3.3.1"
+            "pci_dss": "PCI DSS v4.0.1: 10.2.1"
         },
         "TIME": {
-            "cis": "CIS Control 8.4: Authoritative Time Source Synchronization",
-            "stig": "V-220545 (CAT III): NTP synchronization with trusted sources must be configured.",
+            "cis": "CIS Controls v8 Safeguard 8.4: Standardize Time Synchronization",
             "nist_53": "AU-8(1)", "nist_171": "3.3.7",
-            "pci_dss": "Req 10.6.1", "cmmc": "AU.L2-3.3.7"
+            "pci_dss": "PCI DSS v4.0.1: 10.6.1 and 10.6.2"
         },
         "BANNER": {
-            "cis": "CIS Control 4.1: Configured Warning and Legal Notices",
-            "stig": "V-220510 (CAT III): Display approved legal warning banner prior to logon.",
-            "nist_53": "AC-8", "nist_171": "3.1.9",
-            "pci_dss": "Req 2.2.1", "cmmc": "AC.L2-3.1.9"
+            "nist_53": "AC-8", "nist_171": "3.1.9"
         },
         "PERMISSIVE_POLICY": {
-            "cis": "CIS Control 4.4, 12.1: Implement Defensive Firewall Access Rules",
-            "stig": "V-239855 (CAT II): Restrict traffic; eliminate permit any-any rules.",
+            "cis": "CIS Controls v8 Safeguards 12.2 and 13.4: Secure Network Architecture and Inter-Segment Traffic Filtering",
             "nist_53": "AC-3, AC-4, SC-7", "nist_171": "3.1.3, 3.13.1",
-            "pci_dss": "Req 1.2.1, 1.3.1", "cmmc": "AC.L1-3.1.1"
+            "pci_dss": "PCI DSS v4.0.1: 1.3.1 and 1.3.2 (when in CDE scope)"
         },
         "POLICY_LOGGING": {
-            "cis": "CIS Control 8.5: Log Permitted and Denied Network Traffic",
-            "stig": "V-239856 (CAT II): Security filter rules must generate log audit events.",
-            "nist_53": "AU-2, AU-12", "nist_171": "3.3.1",
-            "pci_dss": "Req 10.2.2", "cmmc": "AU.L2-3.3.1"
+            "cis": "CIS Controls v8 Safeguards 8.2 and 13.6: Collect Audit Logs and Network Traffic Flow Logs",
+            "nist_53": "AU-2, AU-12, SI-4", "nist_171": "3.3.1",
+            "pci_dss": "PCI DSS v4.0.1: 10.2.1 (when in CDE scope)"
         },
         "UTM_INSPECTION": {
-            "cis": "CIS Control 10: Malware Defenses / Control 13: Network Monitoring",
-            "stig": "V-240100 (CAT II): Application and content filtering inspection must be applied.",
+            "cis": "CIS Controls v8 Safeguards 10.1, 13.3, 13.8, and 13.10: Malware and Network Threat Prevention",
             "nist_53": "SI-3, SI-4", "nist_171": "3.14.2, 3.14.4",
-            "pci_dss": "Req 5.2.1, 11.4", "cmmc": "SI.L2-3.14.2"
+            "pci_dss": "PCI DSS v4.0.1: 5.2.1 (when applicable)"
         },
         "WEAK_CRYPTO": {
-            "cis": "CIS Control 3.10, 3.11: Modern Cryptographic Ciphers & Algorithms",
-            "stig": "V-220550 (CAT I): Deprecated cryptographic ciphers (DES, 3DES, MD5, DH <14) prohibited.",
+            "cis": "CIS Controls v8 Safeguards 4.2 and 12.6: Secure Network Configuration and Management Protocols",
             "nist_53": "SC-8, SC-13", "nist_171": "3.13.8, 3.13.11",
-            "pci_dss": "Req 4.2.1", "cmmc": "SC.L2-3.13.8"
+            "pci_dss": "PCI DSS v4.0.1: 2.2.7 and 4.2.1 (as applicable)"
         },
         "SWITCH_SECURITY": {
-            "cis": "CIS Control 12.3: Network Infrastructure Segmentation and Layer 2 Security",
-            "stig": "V-220560 (CAT II): Spanning tree BPDU guard and port protection must be enforced.",
-            "nist_53": "CM-7, SC-7", "nist_171": "3.4.7, 3.13.1",
-            "pci_dss": "Req 1.2.5", "cmmc": "CM.L2-3.4.7"
+            "cis": "CIS Controls v8 Safeguards 12.2 and 13.9: Secure Network Architecture and Port-Level Access Control",
+            "nist_53": "CM-7, SC-7", "nist_171": "3.4.7, 3.13.1"
         },
         "LEGACY_SERVICES": {
-            "cis": "CIS Control 4.7: Uninstall or Disable Insecure Services",
-            "stig": "V-220570 (CAT II): Unnecessary network services (PAD, Finger, BootP) must be disabled.",
+            "cis": "CIS Controls v8 Safeguard 4.8: Uninstall or Disable Unnecessary Services",
             "nist_53": "CM-7(1)", "nist_171": "3.4.6, 3.4.7",
-            "pci_dss": "Req 2.2.2", "cmmc": "CM.L2-3.4.6"
+            "pci_dss": "PCI DSS v4.0.1: 2.2.4 and 2.2.5"
         },
     }
-    return catalog.get(standard_tag, {})
+    mapping = dict(catalog.get(standard_tag, {}))
+    if mapping.get("nist_171"):
+        mapping["cmmc"] = "CMMC Level 2 / NIST SP 800-171 Rev. 2: " + mapping["nist_171"]
+    return mapping
 
 
 # ----------------------------------------------------------------------
-# VENDOR AUDIT ENGINES (ENTERPRISE & EOL MULTI-VENDOR PLATFORMS)
+# VENDOR AUDIT ENGINES (ACTIVE & EOL MULTI-VENDOR PLATFORMS)
 # ----------------------------------------------------------------------
 
 # --- 1. FORTINET FORTIGATE / FORTIOS ---
@@ -3028,7 +3012,7 @@ def audit_lines(lines, source_name, forced_vendor=None, forced_model=None, absen
             "Supply a native configuration file or force a known parser with --vendor.", "cisco-mgmt",
             comp_map("PERMISSIVE_POLICY"))]
 
-    return AuditResult(source_name, info, findings)
+    return AuditResult(source_name, info, findings, len(lines))
 
 
 def audit_file(path, forced_vendor=None, forced_model=None, absence_checks=True):
@@ -3108,7 +3092,7 @@ def console(results):
         print(f" Vendor: {info.vendor:<14} ({info.vendor_confidence:<6}) | Model: {info.model:<18} ({info.model_confidence:<7}) | Host: {info.hostname}")
         print(f" Format: {info.config_format:<14} | OS: {info.os_version:<10} | Scope: {info.scope:<14} | Risk: {result.risk_score}/100")
         print(" Findings: " + "  ".join(f"{s}:{summary[s]}" for s in SEV))
-        print(" Compliance: " + "  ".join(f"{k}:{v}" for k, v in result.compliance_summary.items() if v > 0))
+        print(" Crosswalks: " + "  ".join(f"{k}:{v}" for k, v in result.compliance_summary.items() if v > 0))
         print("=" * 96)
         for warning in info.warnings:
             print(" [inventory note] " + warning)
@@ -3130,7 +3114,7 @@ def write_csv(results, output):
             "Source", "Hostname", "Vendor", "Vendor Confidence", "Model", "Model Confidence",
             "OS Version", "Config Format", "Config Scope", "Risk Score", "Rule ID", "Severity",
             "Category", "Finding Confidence", "Finding", "Evidence", "Impact", "Recommendation",
-            "Remediation CLI", "CIS", "DISA STIG", "NIST 800-53", "NIST 800-171", "PCI-DSS",
+            "Remediation CLI", "CIS", "NIST 800-53", "NIST 800-171 Rev. 2", "PCI DSS v4.0.1",
             "Reference", "Reference URL"
         ])
         for result in results:
@@ -3142,18 +3126,17 @@ def write_csv(results, output):
                     info.model_confidence, info.os_version, info.config_format, info.scope, result.risk_score,
                     finding.rule_id, finding.severity, finding.category, finding.confidence, finding.title,
                     evidence, finding.impact, finding.recommendation, finding.remediation_cmd,
-                    finding.compliance.get("cis", ""), finding.compliance.get("stig", ""),
-                    finding.compliance.get("nist_53", ""), finding.compliance.get("nist_171", ""),
+                    finding.compliance.get("cis", ""), finding.compliance.get("nist_53", ""),
+                    finding.compliance.get("nist_171", ""),
                     finding.compliance.get("pci_dss", ""), finding.reference, finding.reference_url
                 ])
 
 
 def write_json(results, output):
     all_findings = [f for r in results for f in r.findings]
-    total_compliance = {"CIS": 0, "DISA_STIG": 0, "NIST_800_53": 0, "NIST_800_171": 0, "PCI_DSS": 0, "CMMC": 0}
+    total_compliance = {"CIS": 0, "NIST_800_53": 0, "NIST_800_171": 0, "PCI_DSS": 0, "CMMC": 0}
     for f in all_findings:
         if f.compliance.get("cis"): total_compliance["CIS"] += 1
-        if f.compliance.get("stig"): total_compliance["DISA_STIG"] += 1
         if f.compliance.get("nist_53"): total_compliance["NIST_800_53"] += 1
         if f.compliance.get("nist_171"): total_compliance["NIST_800_171"] += 1
         if f.compliance.get("pci_dss"): total_compliance["PCI_DSS"] += 1
@@ -3177,162 +3160,252 @@ def write_json(results, output):
 
 
 def write_html(results, output):
-    colors = {
-        "Critical": "#dc2626", "High": "#ea580c", "Medium": "#d97706",
-        "Low": "#2563eb", "Info": "#475569"
-    }
-    all_findings = [f for r in results for f in r.findings]
+    """Write a self-contained, interactive dashboard matching the documented preview."""
+    compliance_fields = (
+        ("cis", "CIS", "tag-cis"),
+        ("nist_53", "NIST 800-53 R5", "tag-nist"),
+        ("nist_171", "NIST 800-171 R2", "tag-nist"),
+        ("pci_dss", "PCI DSS 4.0.1", "tag-pci"),
+        ("cmmc", "CMMC", "tag-cmmc"),
+    )
+    all_findings = [finding for result in results for finding in result.findings]
     total = counts(all_findings)
-    total_compliance = {"CIS": 0, "DISA STIG": 0, "NIST SP 800-53": 0, "PCI-DSS v4.0": 0, "CMMC 2.0": 0}
-    for f in all_findings:
-        if f.compliance.get("cis"): total_compliance["CIS"] += 1
-        if f.compliance.get("stig"): total_compliance["DISA STIG"] += 1
-        if f.compliance.get("nist_53"): total_compliance["NIST SP 800-53"] += 1
-        if f.compliance.get("pci_dss"): total_compliance["PCI-DSS v4.0"] += 1
-        if f.compliance.get("cmmc"): total_compliance["CMMC 2.0"] += 1
+    total_lines = sum(result.line_count for result in results)
+    average_risk = round(sum(result.risk_score for result in results) / len(results)) if results else 0
+    posture_score = max(0, 100 - average_risk)
+    if posture_score >= 90:
+        posture_label, posture_color = "Strong posture", "#1a7f37"
+    elif posture_score >= 75:
+        posture_label, posture_color = "Moderate exposure", "#0969da"
+    elif posture_score >= 50:
+        posture_label, posture_color = "Action recommended", "#9a6700"
+    else:
+        posture_label, posture_color = "Immediate action required", "#cf222e"
 
-    summary_rows, details = [], []
+    if len(results) == 1:
+        target = results[0]
+        target_name = target.info.model if target.info.model != "Unknown" else target.info.hostname
+        if target_name == "Unknown":
+            target_name = os.path.basename(target.source)
+        target_detail = f"{target.info.vendor} · {target.line_count:,} parsed lines"
+    else:
+        vendor_count = len({result.info.vendor for result in results})
+        target_name = f"{len(results)} devices audited"
+        target_detail = f"{vendor_count} vendor platforms · {total_lines:,} parsed lines"
+
+    def compliance_markup(finding):
+        tags = []
+        for key, label, css_class in compliance_fields:
+            value = finding.compliance.get(key)
+            if value:
+                tags.append(
+                    f'<span class="control"><span class="tag-comp {css_class}">{label}</span>'
+                    f'{html.escape(str(value))}</span>'
+                )
+        return "".join(tags) or '<span class="no-mapping">No mapping</span>'
+
+    finding_rows = []
     for result in results:
-        info, summary = result.info, counts(result.findings)
-        severity_cells = "".join(f'<td class="center" style="background:{colors[s]}15;font-weight:600;color:{colors[s]}">{summary[s] or ""}</td>' for s in SEV)
-        summary_rows.append(
-            f"<tr><td><b>{html.escape(os.path.basename(result.source))}</b></td>"
-            f"<td>{html.escape(info.hostname)}</td>"
-            f"<td><b>{html.escape(info.vendor)}</b><br><small>{html.escape(info.vendor_confidence)}</small></td>"
-            f"<td>{html.escape(info.model)}<br><small>{html.escape(info.model_confidence)}</small></td>"
-            f"<td>{html.escape(info.os_version)}</td>"
-            f"<td>{html.escape(info.scope)}</td>"
-            f'<td class="center"><span class="risk-badge" style="background:{"#dc2626" if result.risk_score>=70 else ("#ea580c" if result.risk_score>=40 else "#16a34a")}">{result.risk_score}/100</span></td>'
-            f"{severity_cells}"
-            f'<td class="center"><b>{len(result.findings)}</b></td></tr>'
-        )
-
-        rows = []
-        for index, finding in enumerate(result.findings, 1):
-            evidence = "<br>".join(
-                f"<code>{'L' + str(n) + ': ' if n else ''}{html.escape(t.strip())}</code>"
-                for n, t in finding.evidence[:20]
-            )
-            ref = html.escape(finding.reference)
+        info = result.info
+        source_name = os.path.basename(result.source)
+        asset_name = info.hostname if info.hostname != "Unknown" else source_name
+        for finding in result.findings:
+            evidence_items = []
+            for line_number, evidence_text in finding.evidence[:20]:
+                line_label = f"L{line_number}" if line_number else "Context"
+                evidence_items.append(
+                    f'<code><span>{line_label}</span>{html.escape(evidence_text.strip())}</code>'
+                )
+            evidence_block = "".join(evidence_items) or '<span class="muted">No line evidence supplied.</span>'
+            evidence_preview = "".join(evidence_items[:3]) or '<span class="muted">No line evidence supplied.</span>'
+            if len(evidence_items) > 3:
+                evidence_preview += f'<span class="more-evidence">+{len(evidence_items) - 3} more evidence lines</span>'
+            reference = html.escape(finding.reference)
             if finding.reference_url:
-                ref = f'<a href="{html.escape(finding.reference_url)}" target="_blank">{ref}</a>'
-
-            comp_tags = []
-            if finding.compliance.get("cis"): comp_tags.append(f'<span class="tag-comp tag-cis">CIS</span> {html.escape(finding.compliance["cis"])}')
-            if finding.compliance.get("stig"): comp_tags.append(f'<span class="tag-comp tag-stig">STIG</span> {html.escape(finding.compliance["stig"])}')
-            if finding.compliance.get("nist_53"): comp_tags.append(f'<span class="tag-comp tag-nist">NIST 800-53</span> {html.escape(finding.compliance["nist_53"])}')
-            if finding.compliance.get("pci_dss"): comp_tags.append(f'<span class="tag-comp tag-pci">PCI-DSS</span> {html.escape(finding.compliance["pci_dss"])}')
-            comp_block = f'<div class="comp-box">{"<br>".join(comp_tags)}</div>' if comp_tags else ""
-
-            remed_block = ""
+                reference = (
+                    f'<a href="{html.escape(finding.reference_url, quote=True)}" target="_blank" '
+                    f'rel="noopener noreferrer">{reference}</a>'
+                )
+            remediation_cli = ""
             if finding.remediation_cmd:
-                remed_block = f'<details class="remed-box"><summary><b>CLI Remediation Script</b></summary><pre><code>{html.escape(finding.remediation_cmd)}</code></pre></details>'
-
-            rows.append(
-                f'<tr class="finding-row severity-{finding.severity.lower()}"><td>{index}</td>'
-                f'<td><span class="badge" style="background:{colors[finding.severity]}">{finding.severity}</span></td>'
-                f'<td><b>{html.escape(finding.rule_id)}</b> — {html.escape(finding.title)}'
-                f'<br><small>{html.escape(finding.category)} | Confidence: {html.escape(finding.confidence)}</small>'
-                f'<br><small>{ref}</small>{comp_block}</td>'
-                f'<td class="evidence">{evidence}</td>'
-                f'<td>{html.escape(finding.impact)}</td>'
-                f'<td>{html.escape(finding.recommendation)}{remed_block}</td></tr>'
+                remediation_cli = (
+                    '<div class="detail-block detail-wide"><h4>CLI remediation script</h4>'
+                    f'<pre><code>{html.escape(finding.remediation_cmd)}</code></pre></div>'
+                )
+            searchable = " ".join((
+                finding.severity, finding.rule_id, finding.category, finding.title,
+                finding.impact, finding.recommendation, asset_name, source_name,
+            )).lower()
+            finding_rows.append(
+                f'<article class="finding-row severity-{finding.severity.lower()}" '
+                f'data-severity="{finding.severity.lower()}" '
+                f'data-search="{html.escape(searchable, quote=True)}">'
+                f'<div class="severity-cell"><span class="badge">{html.escape(finding.severity)}</span></div>'
+                f'<div class="domain-cell">{html.escape(finding.category)}</div>'
+                '<div class="finding-cell">'
+                f'<h3>{html.escape(finding.title)}</h3>'
+                f'<p>{html.escape(finding.impact)}</p>'
+                '<div class="finding-meta">'
+                f'<span>{html.escape(finding.rule_id)}</span><span>{html.escape(asset_name)}</span>'
+                f'<span>{html.escape(source_name)}</span><span>{html.escape(finding.confidence)} confidence</span>'
+                '</div>'
+                f'<div class="evidence-preview"><strong>Evidence</strong><div class="evidence-list">{evidence_preview}</div></div>'
+                '<details class="finding-details">'
+                '<summary>Full evidence, remediation &amp; reference</summary>'
+                '<div class="details-grid">'
+                f'<div class="detail-block detail-wide"><h4>All evidence</h4><div class="evidence-list">{evidence_block}</div></div>'
+                f'<div class="detail-block"><h4>Recommended action</h4><p>{html.escape(finding.recommendation)}</p></div>'
+                f'<div class="detail-block"><h4>Reference</h4><p>{reference}</p></div>'
+                f'{remediation_cli}'
+                '</div></details></div>'
+                f'<div class="compliance-cell">{compliance_markup(finding)}</div>'
+                '</article>'
             )
 
-        warnings = "".join(f'<div class="note"><b>Inventory note:</b> {html.escape(w)}</div>' for w in info.warnings)
-        details.append(
-            f'<div class="device-card"><h2>{html.escape(os.path.basename(result.source))} — {html.escape(info.hostname)}</h2>'
-            f'<p class="meta">Vendor: <b>{html.escape(info.vendor)}</b> ({html.escape(info.vendor_confidence)}) | '
-            f'Model: <b>{html.escape(info.model)}</b> ({html.escape(info.model_confidence)}) | '
-            f'Format: {html.escape(info.config_format)} | OS: {html.escape(info.os_version)} | Scope: {html.escape(info.scope)} | '
-            f'Risk: <b>{result.risk_score}/100</b></p>{warnings}'
-            f'<details class="meta"><summary>Detection Evidence</summary><p>{html.escape("; ".join(info.evidence))}</p></details>'
-            f'<table><tr><th style="width:30px">#</th><th style="width:85px">Severity</th><th>Finding & Compliance</th><th>Evidence</th><th>Impact</th><th>Remediation Guidance</th></tr>{"".join(rows)}</table></div>'
+    summary_rows = []
+    inventory_notes = []
+    for result in results:
+        info = result.info
+        summary = counts(result.findings)
+        risk_class = "risk-critical" if result.risk_score >= 70 else ("risk-high" if result.risk_score >= 40 else "risk-low")
+        severity_cells = "".join(
+            f'<td class="number severity-text-{severity.lower()}">{summary[severity]}</td>'
+            for severity in SEV
+        )
+        detection_evidence = html.escape("; ".join(info.evidence)) or "No detection evidence recorded."
+        summary_rows.append(
+            '<tr>'
+            f'<td><strong>{html.escape(os.path.basename(result.source))}</strong>'
+            f'<details class="asset-evidence"><summary>Detection evidence</summary><p>{detection_evidence}</p></details></td>'
+            f'<td>{html.escape(info.hostname)}</td>'
+            f'<td><strong>{html.escape(info.vendor)}</strong><small>{html.escape(info.vendor_confidence)} confidence</small></td>'
+            f'<td>{html.escape(info.model)}<small>{html.escape(info.os_version)}</small></td>'
+            f'<td class="number">{result.line_count:,}</td>'
+            f'<td class="number"><span class="risk-index {risk_class}">{result.risk_score}</span></td>'
+            f'{severity_cells}<td class="number total-number">{len(result.findings)}</td>'
+            '</tr>'
+        )
+        for warning in info.warnings:
+            inventory_notes.append(
+                f'<div class="note"><strong>{html.escape(os.path.basename(result.source))}</strong>'
+                f'<span>{html.escape(warning)}</span></div>'
+            )
+
+    filter_buttons = [
+        f'<button class="filter-btn active" type="button" data-filter="all" aria-pressed="true">All <span>{len(all_findings)}</span></button>'
+    ]
+    for severity in SEV:
+        filter_buttons.append(
+            f'<button class="filter-btn filter-{severity.lower()}" type="button" '
+            f'data-filter="{severity.lower()}" aria-pressed="false">'
+            f'{severity} <span>{total[severity]}</span></button>'
         )
 
     generated = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
-    kpi_badges = " ".join(f'<span class="kpi-pill" style="border-left: 4px solid {colors[s]}"><b>{s}</b> {total[s]}</span>' for s in SEV)
-    comp_kpi = " ".join(f'<span class="kpi-pill" style="border-left: 4px solid #4f46e5"><b>{k}</b> {v}</span>' for k, v in total_compliance.items())
+    priority_count = total["Critical"] + total["High"]
 
     document = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{TOOL_NAME} - Enterprise Audit Report</title>
+<meta name="color-scheme" content="light">
+<title>Configuration Review Report</title>
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 24px 36px; background: #f8fafc; color: #1e293b; }}
-  header {{ background: #0f172a; color: #fff; padding: 24px 32px; border-radius: 8px; margin-bottom: 24px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }}
-  h1 {{ font-size: 26px; margin: 0 0 6px 0; font-weight: 700; letter-spacing: -0.5px; }}
-  .subtitle {{ color: #94a3b8; font-size: 14px; margin: 0; }}
-  .meta-bar {{ margin-top: 16px; font-size: 13px; color: #cbd5e1; display: flex; gap: 24px; flex-wrap: wrap; }}
-  .kpi-section {{ display: flex; gap: 12px; margin: 16px 0 24px 0; flex-wrap: wrap; }}
-  .kpi-pill {{ background: #fff; border: 1px solid #e2e8f0; padding: 8px 14px; border-radius: 6px; font-size: 13px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }}
-  .kpi-pill b {{ margin-right: 4px; color: #0f172a; }}
-  h2 {{ font-size: 18px; margin: 28px 0 12px 0; color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 6px; }}
-  table {{ border-collapse: collapse; width: 100%; margin-top: 10px; background: #fff; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
-  th, td {{ border: 1px solid #e2e8f0; padding: 10px 12px; vertical-align: top; text-align: left; font-size: 13px; }}
-  th {{ background: #1e293b; color: #f8fafc; font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }}
-  tr:nth-child(even) {{ background: #f8fafc; }}
-  .center {{ text-align: center; }}
-  .badge {{ color: #fff; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; text-transform: uppercase; display: inline-block; }}
-  .risk-badge {{ color: #fff; padding: 4px 8px; border-radius: 12px; font-weight: 700; font-size: 12px; }}
-  .evidence {{ max-width: 360px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }}
-  code {{ background: #f1f5f9; color: #0f172a; padding: 2px 5px; border-radius: 4px; font-size: 11.5px; display: inline-block; margin-bottom: 2px; border: 1px solid #e2e8f0; }}
-  pre code {{ display: block; background: #0f172a; color: #38bdf8; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 12px; border: none; }}
-  .note {{ background: #fffbeb; border-left: 4px solid #f59e0b; padding: 8px 12px; margin: 8px 0; font-size: 12.5px; color: #92400e; }}
-  .device-card {{ background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; margin-top: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
-  .device-card h2 {{ margin-top: 0; }}
-  .tag-comp {{ font-size: 9.5px; font-weight: 700; padding: 2px 5px; border-radius: 3px; color: #fff; display: inline-block; margin-right: 4px; }}
-  .tag-cis {{ background: #2563eb; }}
-  .tag-stig {{ background: #dc2626; }}
-  .tag-nist {{ background: #059669; }}
-  .tag-pci {{ background: #d97706; }}
-  .comp-box {{ margin-top: 6px; font-size: 11.5px; line-height: 1.4; color: #475569; background: #f8fafc; padding: 6px 8px; border-radius: 4px; border: 1px dashed #cbd5e1; }}
-  .remed-box {{ margin-top: 8px; font-size: 12px; cursor: pointer; }}
-  .remed-box summary {{ color: #2563eb; font-weight: 600; outline: none; }}
-  a {{ color: #2563eb; text-decoration: none; }}
-  a:hover {{ text-decoration: underline; }}
-  .filter-bar {{ margin: 16px 0; display: flex; gap: 10px; align-items: center; }}
-  .filter-input {{ padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; width: 300px; }}
+  :root {{ --canvas:#ffffff; --surface:#ffffff; --raised:#f6f8fa; --border:#d0d7de; --text:#111827; --body:#24292f; --muted:#57606a; --blue:#0969da; --green:#1a7f37; --critical:#cf222e; --high:#9a3412; --medium:#7d5d00; --shadow:0 3px 12px rgba(31,35,40,.08); }}
+  * {{ box-sizing:border-box; }}
+  html,body {{ margin:0; min-width:320px; background:var(--canvas); color:var(--body); font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; font-size:15px; line-height:1.55; }}
+  button,input {{ font:inherit; }} a {{ color:var(--blue); text-decoration:none; }} a:hover {{ text-decoration:underline; }}
+  .dashboard {{ width:min(1480px,100%); margin:auto; padding:36px 34px 52px; }}
+  .report-header {{ display:flex; align-items:flex-start; justify-content:space-between; gap:28px; margin-bottom:24px; padding-bottom:18px; border-bottom:1px solid var(--border); }}
+  .title-wrap {{ display:flex; align-items:flex-start; }}
+  h1 {{ margin:0 0 4px; color:var(--text); font-size:25px; line-height:1.25; letter-spacing:-.35px; }}
+  .subtitle {{ margin:0; color:var(--muted); font-size:13.5px; }}
+  .generated {{ margin:4px 0 0; color:var(--muted); font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; text-align:right; white-space:nowrap; }}
+  .metrics {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; margin-bottom:20px; }}
+  .metric-card {{ min-height:120px; padding:20px 22px 18px; background:var(--surface); border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow); overflow:hidden; }}
+  .metric-label {{ margin:0 0 12px; color:var(--muted); font-size:10.5px; font-weight:700; letter-spacing:.72px; text-transform:uppercase; }}
+  .metric-value {{ display:block; color:var(--text); font-size:31px; font-weight:750; line-height:1.1; letter-spacing:-.6px; }}
+  .metric-value small {{ color:var(--muted); font-size:14px; font-weight:600; letter-spacing:0; }}
+  .metric-value.asset {{ color:var(--blue); font-size:18px; letter-spacing:-.15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+  .metric-foot {{ display:block; margin-top:8px; color:var(--muted); font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+  .metric-foot.priority {{ color:var(--critical); }}
+  .toolbar {{ display:flex; align-items:center; justify-content:space-between; gap:14px; margin:20px 0 14px; }}
+  .filters {{ display:flex; flex-wrap:wrap; gap:8px; }}
+  .filter-btn {{ appearance:none; border:1px solid var(--border); border-radius:6px; background:var(--surface); color:var(--body); padding:7px 13px; font-size:11.5px; font-weight:650; cursor:pointer; transition:.15s ease; }}
+  .filter-btn span {{ color:var(--muted); margin-left:3px; }} .filter-btn:hover {{ border-color:#57606a; background:var(--raised); }} .filter-btn.active {{ border-color:#1f2328; background:#1f2328; color:#fff; }} .filter-btn.active span {{ color:#fff; }}
+  .filter-critical,.filter-high,.filter-medium,.filter-low {{ color:var(--body); }}
+  .search-wrap {{ position:relative; flex:0 1 310px; }} .search-wrap svg {{ position:absolute; left:12px; top:50%; width:15px; height:15px; transform:translateY(-50%); fill:var(--muted); pointer-events:none; }}
+  .search-input {{ width:100%; padding:7px 12px 7px 35px; color:var(--body); background:var(--surface); border:1px solid var(--border); border-radius:7px; outline:none; font-size:12px; }} .search-input:focus {{ border-color:#57606a; box-shadow:0 0 0 3px rgba(175,184,193,.24); }} .search-input::placeholder {{ color:#6e7781; }}
+  .findings-panel {{ overflow:hidden; border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); }}
+  .findings-header,.finding-row {{ display:grid; grid-template-columns:112px 205px minmax(420px,1fr) 265px; }}
+  .findings-header {{ min-height:38px; align-items:center; background:var(--surface); border-bottom:1px solid var(--border); color:var(--muted); font-size:10.5px; font-weight:700; letter-spacing:.55px; text-transform:uppercase; }}
+  .findings-header>div {{ padding:11px 15px; }} .finding-row>div {{ padding:15px; }} .finding-row {{ background:var(--canvas); border-bottom:1px solid var(--border); }} .finding-row:nth-child(odd) {{ background:#f8fafc; }} .finding-row:last-of-type {{ border-bottom:0; }} .finding-row[hidden] {{ display:none; }}
+  .severity-cell,.domain-cell,.compliance-cell {{ border-right:1px solid var(--border); }} .severity-cell {{ display:flex; align-items:flex-start; }}
+  .badge {{ display:inline-flex; min-width:72px; justify-content:center; border:1px solid currentColor; border-radius:5px; padding:3px 8px; background:transparent; font-size:10px; line-height:1.45; font-weight:750; letter-spacing:.25px; text-transform:uppercase; }}
+  .severity-critical .badge {{ color:var(--critical); }} .severity-high .badge {{ color:var(--high); }} .severity-medium .badge {{ color:var(--medium); }} .severity-low .badge {{ color:var(--blue); }} .severity-info .badge {{ color:var(--muted); }}
+  .domain-cell {{ color:var(--body); font-size:12.5px; }} .finding-cell {{ min-width:0; }} .finding-cell h3 {{ margin:0 0 4px; color:var(--text); font-size:14px; line-height:1.4; }} .finding-cell>p {{ margin:0; color:var(--muted); font-size:12px; }}
+  .finding-meta {{ display:flex; flex-wrap:wrap; gap:5px 13px; margin-top:7px; color:#6e7781; font:10px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; }} .finding-meta span+span::before {{ content:"•"; margin-right:13px; }}
+  .compliance-cell {{ display:flex; flex-direction:column; align-items:flex-start; gap:5px; border-right:0; }} .control {{ display:flex; align-items:flex-start; gap:6px; color:var(--muted); font-size:10px; line-height:1.35; }}
+  .tag-comp {{ flex:0 0 auto; min-width:78px; padding:2px 5px; border:1px solid var(--border); border-radius:3px; background:var(--raised); color:var(--body); font-size:8.5px; font-weight:750; letter-spacing:.2px; text-align:center; white-space:nowrap; }} .no-mapping {{ color:#6e7781; font-size:11px; }}
+  .finding-details {{ margin-top:8px; border-top:1px dashed var(--border); padding-top:7px; }} .finding-details>summary,.asset-evidence>summary {{ width:max-content; color:var(--blue); cursor:pointer; font-size:10.5px; font-weight:650; list-style:none; }} .finding-details>summary::-webkit-details-marker,.asset-evidence>summary::-webkit-details-marker {{ display:none; }} .finding-details>summary::before,.asset-evidence>summary::before {{ content:"›"; display:inline-block; margin-right:6px; transition:transform .15s; }} .finding-details[open]>summary::before,.asset-evidence[open]>summary::before {{ transform:rotate(90deg); }}
+  .details-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-top:9px; }} .detail-block {{ min-width:0; padding:9px 10px; background:var(--raised); border:1px solid var(--border); border-radius:6px; }} .detail-block h4 {{ margin:0 0 5px; color:var(--muted); font-size:9px; letter-spacing:.5px; text-transform:uppercase; }} .detail-block p {{ margin:0; color:var(--body); font-size:10.5px; }} .detail-wide {{ grid-column:1/-1; }}
+  .evidence-preview {{ margin-top:11px; padding:9px 10px; background:var(--raised); border:1px solid var(--border); border-radius:5px; }} .evidence-preview>strong {{ display:block; margin-bottom:5px; color:var(--muted); font-size:9px; letter-spacing:.55px; text-transform:uppercase; }}
+  .evidence-list {{ display:grid; gap:3px; }} .evidence-list code {{ display:block; overflow-wrap:anywhere; color:var(--body); background:transparent; border-left:2px solid #afb8c1; padding:3px 7px; font:10.5px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; }} .evidence-list code span {{ display:inline-block; min-width:54px; color:var(--muted); }} .more-evidence {{ margin:3px 0 0 9px; color:var(--muted); font-size:10px; }} pre {{ margin:0; max-width:100%; overflow:auto; }} pre code {{ color:var(--body); font:10.5px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre; }}
+  .results-count {{ margin:9px 2px 0; color:var(--muted); font-size:11px; text-align:right; }} .empty-state {{ padding:34px; color:var(--muted); text-align:center; }}
+  .framework-note {{ margin:10px 2px 0; color:var(--muted); font-size:10.5px; }}
+  .section-heading {{ display:flex; align-items:end; justify-content:space-between; gap:20px; margin:20px 0 10px; }} .section-heading h2 {{ margin:0; color:var(--text); font-size:18px; letter-spacing:-.2px; }} .section-heading p {{ margin:0; color:var(--muted); font-size:11.5px; }}
+  .notes {{ display:grid; gap:8px; margin-bottom:12px; }} .note {{ display:grid; grid-template-columns:minmax(140px,220px) 1fr; gap:14px; padding:9px 12px; border:1px solid rgba(210,153,34,.4); border-left:3px solid var(--medium); border-radius:5px; background:rgba(210,153,34,.07); font-size:11px; }} .note strong {{ color:var(--medium); }}
+  .table-wrap {{ overflow-x:auto; border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow); }} table {{ width:100%; min-width:1040px; border-collapse:collapse; background:var(--canvas); }} th,td {{ padding:11px 13px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top; font-size:12px; }} th {{ background:var(--surface); color:var(--muted); font-size:10px; letter-spacing:.45px; text-transform:uppercase; }} tbody tr:nth-child(even) {{ background:var(--surface); }} tbody tr:last-child td {{ border-bottom:0; }} td strong {{ color:var(--text); }} td small {{ display:block; color:var(--muted); font-size:10px; }}
+  .number {{ text-align:center; font-variant-numeric:tabular-nums; }} .total-number {{ color:var(--text); font-weight:750; }} .severity-text-critical {{ color:var(--critical); }} .severity-text-high {{ color:var(--high); }} .severity-text-medium {{ color:var(--medium); }} .severity-text-low {{ color:var(--blue); }} .severity-text-info {{ color:var(--muted); }}
+  .risk-index {{ display:inline-grid; min-width:35px; height:25px; place-items:center; border:1px solid #484f58; border-radius:5px; background:var(--raised); color:var(--text); font-weight:750; }} .risk-critical {{ border-color:rgba(255,123,114,.65); }} .risk-high {{ border-color:rgba(220,162,106,.65); }} .risk-low {{ border-color:#484f58; }} .asset-evidence {{ margin-top:4px; }} .asset-evidence p {{ width:320px; margin:6px 0 0; color:var(--muted); font-size:10px; }}
+  .report-footer {{ display:flex; justify-content:space-between; gap:20px; margin-top:26px; padding-top:16px; border-top:1px solid var(--border); color:#6e7781; font-size:10.5px; }} .muted {{ color:var(--muted); }}
+  @media (max-width:1050px) {{ .findings-header,.finding-row {{ grid-template-columns:100px 170px minmax(320px,1fr); }} .findings-header>div:last-child,.compliance-cell {{ grid-column:3; border-top:1px dashed var(--border); border-left:0; }} .findings-header>div:last-child {{ display:none; }} }}
+  @media (max-width:720px) {{ .dashboard {{ padding:24px 15px 36px; }} .report-header,.toolbar {{ align-items:stretch; flex-direction:column; }} .generated {{ text-align:left; }} .metrics {{ grid-template-columns:1fr; }} .search-wrap {{ flex-basis:auto; max-width:none; }} .findings-header {{ display:none; }} .finding-row {{ grid-template-columns:92px 1fr; }} .severity-cell {{ border-right:1px solid var(--border); }} .domain-cell {{ border-right:0; }} .finding-cell,.compliance-cell {{ grid-column:1/-1; border-top:1px solid var(--border); border-right:0; }} .details-grid {{ grid-template-columns:1fr; }} .detail-wide {{ grid-column:auto; }} .note {{ grid-template-columns:1fr; gap:3px; }} .report-footer {{ flex-direction:column; }} }}
+  @media print {{ :root {{ --canvas:#fff; --surface:#f6f8fa; --raised:#fff; --border:#d0d7de; --text:#1f2328; --body:#24292f; --muted:#57606a; }} body {{ color:#24292f; }} .dashboard {{ max-width:none; padding:12px; }} .toolbar {{ display:none; }} .metric-card,.findings-panel,.table-wrap {{ box-shadow:none; }} .finding-details:not([open]) {{ display:none; }} }}
 </style>
 </head>
 <body>
-<header>
-  <h1>{TOOL_NAME}</h1>
-  <p class="subtitle">{TOOL_SUBTITLE} (Version {TOOL_VERSION})</p>
-  <div class="meta-bar">
-    <div><b>Generated:</b> {html.escape(generated)}</div>
-    <div><b>Devices Audited:</b> {len(results)}</div>
-    <div><b>Total Findings:</b> {len(all_findings)}</div>
-  </div>
-</header>
-
-<div class="kpi-section">
-  {kpi_badges}
-</div>
-<div class="kpi-section">
-  {comp_kpi}
-</div>
-
-<h2>Fleet Devices Summary</h2>
-<table>
-  <tr>
-    <th>Source Configuration</th><th>Hostname</th><th>Vendor Platform</th><th>Hardware Model</th>
-    <th>OS Version</th><th>Config Scope</th><th>Risk Index</th>
-    {''.join(f'<th>{s}</th>' for s in SEV)}<th>Total</th>
-  </tr>
-  {''.join(summary_rows)}
-</table>
-
-{''.join(details)}
-
-<p class="meta" style="margin-top:32px;font-size:12px;color:#64748b;">
-  <i>Automated static configuration review engine. Always validate findings against operational requirements, network architecture, and business change authorization.</i>
-</p>
+<main class="dashboard">
+  <header class="report-header">
+    <div class="title-wrap"><h1>Configuration Review Report</h1></div>
+    <p class="generated">NTConfReviewer v{html.escape(TOOL_VERSION)}<br>Generated {html.escape(generated)}</p>
+  </header>
+  <section class="metrics" aria-label="Audit metrics">
+    <article class="metric-card"><p class="metric-label">Security posture score</p><span class="metric-value" style="color:{posture_color}">{posture_score} <small>/ 100</small></span><span class="metric-foot" style="color:{posture_color}">{posture_label}</span></article>
+    <article class="metric-card"><p class="metric-label">Target assets</p><span class="metric-value asset" title="{html.escape(target_name, quote=True)}">{html.escape(target_name)}</span><span class="metric-foot">{html.escape(target_detail)}</span></article>
+    <article class="metric-card"><p class="metric-label">Total findings</p><span class="metric-value">{len(all_findings)} <small>issues detected</small></span><span class="metric-foot priority">{priority_count} Critical / High priority</span></article>
+  </section>
+  <section aria-labelledby="assets-title">
+    <div class="section-heading"><h2 id="assets-title">Audited assets</h2><p>Risk index measures accumulated finding severity; 100 is highest risk.</p></div>
+    <div class="notes">{''.join(inventory_notes)}</div>
+    <div class="table-wrap"><table><thead><tr><th>Source configuration</th><th>Hostname</th><th>Vendor</th><th>Model / OS</th><th>Lines</th><th>Risk</th>{''.join(f'<th>{severity}</th>' for severity in SEV)}<th>Total</th></tr></thead><tbody>{''.join(summary_rows)}</tbody></table></div>
+  </section>
+  <section aria-labelledby="findings-title">
+    <div class="toolbar"><div class="filters" role="group" aria-label="Filter findings by severity">{''.join(filter_buttons)}</div>
+      <label class="search-wrap"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11.5 10.5h-.79l-.28-.27A6.5 6.5 0 1 0 10.5 11l.27.28v.79l4.25 4.24 1.27-1.27-4.24-4.25-.55-.29ZM6.5 11A4.5 4.5 0 1 1 6.5 2a4.5 4.5 0 0 1 0 9Z"/></svg><input id="finding-search" class="search-input" type="search" placeholder="Search findings, assets, rules..." aria-label="Search findings"></label>
+    </div>
+    <div class="findings-panel" id="findings-panel"><div class="findings-header" id="findings-title"><div>Severity</div><div>Security domain</div><div>Finding title &amp; description</div><div>Framework crosswalk</div></div>{''.join(finding_rows)}<div class="empty-state" id="empty-state" hidden>No findings match the selected filters.</div></div>
+    <p class="framework-note">Framework references are informational crosswalks, not a certification of compliance. Applicability depends on system scope, framework version, and organizational requirements.</p>
+    <p class="results-count" id="results-count">Showing {len(all_findings)} of {len(all_findings)} findings</p>
+  </section>
+  <footer class="report-footer"><span>Configuration Review Report &bull; standalone offline report</span><span>Validate automated findings against architecture, operational requirements, and change authorization.</span></footer>
+</main>
+<script>
+(() => {{
+  const buttons=[...document.querySelectorAll('.filter-btn')], rows=[...document.querySelectorAll('.finding-row')], search=document.getElementById('finding-search'), count=document.getElementById('results-count'), empty=document.getElementById('empty-state');
+  let selectedSeverity='all';
+  function applyFilters() {{
+    const query=search.value.trim().toLowerCase(); let visible=0;
+    rows.forEach((row) => {{ const show=(selectedSeverity==='all'||row.dataset.severity===selectedSeverity)&&(!query||row.dataset.search.includes(query)); row.hidden=!show; if(show) visible+=1; }});
+    count.textContent=`Showing ${{visible}} of ${{rows.length}} findings`; empty.hidden=visible!==0;
+  }}
+  buttons.forEach((button) => button.addEventListener('click',() => {{ selectedSeverity=button.dataset.filter; buttons.forEach((candidate) => {{ const active=candidate===button; candidate.classList.toggle('active',active); candidate.setAttribute('aria-pressed',String(active)); }}); applyFilters(); }}));
+  search.addEventListener('input',applyFilters);
+}})();
+</script>
 </body>
 </html>"""
-
     with open(output, "w", encoding="utf-8") as fh:
         fh.write(document)
 
@@ -3342,7 +3415,7 @@ def write_html(results, output):
 # ----------------------------------------------------------------------
 def print_supported():
     print_banner()
-    print("\nSupported Active Enterprise Platforms & Asset Models:")
+    print("\nSupported Platforms & Asset Models:")
     active = ["cisco-asa", "cisco-ios", "cisco-nxos", "cisco-xr", "fortigate", "paloalto", "juniper", "checkpoint", "arista", "aruba-hp", "brocade-ruckus", "extreme", "f5-bigip", "watchguard", "huawei"]
     for v in active:
         models = SUPPORTED_MODELS[v]
@@ -3352,12 +3425,12 @@ def print_supported():
     for v in eol:
         models = SUPPORTED_MODELS[v]
         print(f"  * {v + ' (EOL)':<18}: {', '.join(models[:6])}{'...' if len(models)>6 else ''}")
-    print("\nSupported Security & Compliance Frameworks:")
-    print("  * Center for Internet Security (CIS) Benchmarks & Controls v8")
-    print("  * DoD DISA STIGs (Cisco ASA, IOS-XE, NX-OS, Junos SRX, FortiGate, PAN-OS, F5)")
-    print("  * NIST SP 800-53 Rev 5 & NIST SP 800-171 Rev 3")
-    print("  * Payment Card Industry Data Security Standard (PCI-DSS) v4.0")
-    print("  * Cybersecurity Maturity Model Certification (CMMC) 2.0")
+    print("\nSupported Informational Framework Crosswalks:")
+    print("  * CIS Critical Security Controls v8")
+    print("  * NIST SP 800-53 Rev. 5 and NIST SP 800-171 Rev. 2")
+    print("  * PCI Data Security Standard v4.0.1, when applicable")
+    print("  * CMMC 2.0 Level 2 (NIST SP 800-171 Rev. 2 basis)")
+    print("  * Product/version-specific DISA STIG vulnerability IDs are not inferred")
     print("\nSupported File & Archive Formats:")
     print("  * Text / CLI outputs (.conf, .cfg, .set, .txt, .xml, .backup, .log, .c, .fws, .ndb)")
     print("  * Archives: .zip, .tar, .tgz, .tar.gz, .tar.bz2, .tar.xz")
@@ -3460,12 +3533,35 @@ def self_test():
     if "cisco" in decoded_redacted or "045802150C2E" in decoded_redacted:
         failures.append("Decoded password evidence redaction failed")
 
+    # Standalone HTML report checks: rendering, escaping, metrics, and UI controls.
+    report_content = "version 15.0\nhostname Audit-Test\nline vty 0 4\n transport input telnet\n"
+    report_lines = [(i + 1, line) for i, line in enumerate(report_content.splitlines())]
+    report_result = audit_lines(report_lines, "<unsafe-name>.cfg", "cisco-ios")
+    if report_result.line_count != len(report_lines):
+        failures.append("Parsed line count was not retained in the audit result")
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = os.path.join(temp_dir, "self-test-report.html")
+            write_html([report_result], report_path)
+            with open(report_path, "r", encoding="utf-8") as report_file:
+                report_html = report_file.read()
+        required_report_markers = (
+            "Configuration Review Report", "Security posture score",
+            'data-filter="critical"', 'id="finding-search"', "Audited assets",
+        )
+        if not all(marker in report_html for marker in required_report_markers):
+            failures.append("Interactive HTML report is missing required dashboard controls")
+        if "<unsafe-name>" in report_html or "&lt;unsafe-name&gt;.cfg" not in report_html:
+            failures.append("HTML report output escaping failed")
+    except OSError as exc:
+        failures.append(f"HTML report generation failed: {exc}")
+
     if failures:
         print("SELF-TEST FAILED")
         for failure in failures:
             print(" - " + failure)
         return 1
-    print(f"SELF-TEST PASSED ({len(cases)} multi-vendor detection cases + rule verification + password decoding + evidence redaction)")
+    print(f"SELF-TEST PASSED ({len(cases)} multi-vendor detection cases + rules + decoding + redaction + HTML report)")
     return 0
 
 
@@ -3478,7 +3574,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Offline Multi-Vendor Network & Firewall Security Review",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Use --list-supported to view supported platforms, assets, and compliance frameworks."
+        epilog="Use --list-supported to view supported platforms, assets, and framework crosswalks."
     )
     parser.add_argument("config", nargs="?", help="single config file or ZIP/TAR/TGZ bundle")
     parser.add_argument("--dir", help="directory containing configurations")
@@ -3504,6 +3600,9 @@ def main(argv=None):
     parser.add_argument("--version", action="version", version=f"%(prog)s {TOOL_VERSION}")
     args = parser.parse_args(argv)
 
+    global REDACT_SECRETS
+    REDACT_SECRETS = not args.show_passwords
+
     if args.list_supported:
         print_supported()
         return 0
@@ -3518,9 +3617,6 @@ def main(argv=None):
         else:
             print(f"Error: Unable to decode '{args.decode_password}' as Cisco Type 7 or Juniper $9$.")
             return 1
-    if args.show_passwords:
-        global REDACT_SECRETS
-        REDACT_SECRETS = False
     if not args.config and not args.dir:
         parser.error("provide a config file/archive or --dir")
     if args.config and args.dir:
@@ -3547,8 +3643,11 @@ def main(argv=None):
 
     if args.out:
         writers = {"html": write_html, "csv": write_csv, "json": write_json}
-        for path in report_paths:
-            writers[os.path.splitext(path)[1].lstrip(".").lower()](results, path)
+        try:
+            for path in report_paths:
+                writers[os.path.splitext(path)[1].lstrip(".").lower()](results, path)
+        except OSError as exc:
+            parser.error(f"unable to write report: {exc}")
         print("\n[+] wrote " + ", ".join(report_paths))
 
     if args.fail_on:
