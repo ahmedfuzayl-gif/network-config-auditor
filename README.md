@@ -118,7 +118,7 @@ python NTConfReviewer.py --self-test
 
 ## Command Line Reference
 
-`	ext
+
 usage: NTConfReviewer.py [-h] [--dir DIR] [--recursive] [--vendor VENDOR]
                          [--model MODEL] [--no-absence-checks] [-o OUT]
                          [--format {all,html,csv,json}]
@@ -142,9 +142,7 @@ Options:
   --list-supported       Print comprehensive list of supported platforms and models
   --self-test            Run built-in multi-vendor test suite
   --version              Display version information
-`
 
----
 
 ## License
 
