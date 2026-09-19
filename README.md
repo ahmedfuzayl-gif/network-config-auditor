@@ -8,17 +8,6 @@
 **NTConfReviewer** is an offline, zero-dependency static configuration security review engine for enterprise firewalls, switches, routers, and load balancers.
 
 Built specifically for air-gapped enclaves, security operations centers (SOC), and compliance audits, NTConfReviewer analyzes raw network configuration files and fleet archives without sending data over the network or requiring external Python packages.
-
----
-
-## Visual Previews
-
-### CLI Terminal Execution
-![CLI Terminal Run](docs/screenshots/terminal_preview.svg)
-
-### Interactive HTML Security Report
-![HTML Security Dashboard](docs/screenshots/report_preview.svg)
-
 ---
 
 ## Key Capabilities
