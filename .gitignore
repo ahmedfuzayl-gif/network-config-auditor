@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.class
+*.bak
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Generated audit reports and temporary output artifacts
+fleet_report.*
+fleet_test_review.*
+fleet_test_run.json
+test_review.*
+*.log
+
+# Private test configs and sample data
+test_configs/
+_samples_inspect/
+sample_configs.zip
+test_fortigate.conf
+scratch/
+
+# Legacy filename
+config_review.py
